@@ -3,7 +3,6 @@ import tempfile
 import os
 import re
 import json
-import fitz
 import pandas as pd
 import plotly.graph_objects as go
 from roadmap_engine import generate_roadmap, present_roadmap, configure_gemini, RoadmapGenerationError
@@ -11,10 +10,12 @@ from goal_analyzer import analyze_goals
 from PIL import Image
 from PyPDF2 import PdfReader
 from smart_gap_analysis import get_smart_gap_analysis, SmartGapAnalysisError
+import platform
 # -----------------------------
 # Streamlit Page Config
 # -----------------------------
 st.set_page_config(page_title="SkillPath AI", page_icon="📈", layout="wide")
+
 
 # -----------------------------
 # Theme Setter
@@ -100,20 +101,38 @@ def set_theme(theme):
     .main-subheading {{
         color: {logo_color} !important;
     }}
+    /* Compact mode styling */
+    .stCardCompact {{
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+    }}
+    .stCardCompact h3 {{
+        font-size: 1.1rem;
+        margin-bottom: 0.5rem;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
+
 # -----------------------------
-# Sidebar
-# -----------------------------
-# -----------------------------
-# Sidebar: Toggleable Settings
+# Initialize session state variables
 # -----------------------------
 if "show_settings" not in st.session_state:
     st.session_state.show_settings = False
+if "theme_choice" not in st.session_state:
+    st.session_state.theme_choice = "Dark"
+if "bar_height" not in st.session_state:
+    st.session_state.bar_height = 50
+if "show_tables" not in st.session_state:
+    st.session_state.show_tables = True
+if "resume_uploaded" not in st.session_state:
+    st.session_state.resume_uploaded = False
 
-# Apply theme first, regardless of button click
-theme_choice = st.session_state.get("theme_choice", "Dark")
+# -----------------------------
+# Sidebar: Toggleable Settings
+# -----------------------------
+# Apply theme first
+theme_choice = st.session_state.theme_choice
 set_theme(theme_choice)
 
 # Settings button
@@ -123,25 +142,28 @@ if st.sidebar.button("⚙️ Settings"):
 # Only show settings controls when toggled
 if st.session_state.show_settings:
     # Theme selector
-    theme_choice = st.sidebar.radio("Theme", ["Light", "Dark"], index=0 if theme_choice=="Light" else 1)
+    theme_choice = st.sidebar.radio("Theme", ["Light", "Dark"],
+                                    index=0 if theme_choice == "Light" else 1)
     st.session_state.theme_choice = theme_choice
     set_theme(theme_choice)
 
     # Other settings
-    bar_height = st.sidebar.slider("Bar Height per Skill (px)", min_value=30, max_value=80, value=st.session_state.get("bar_height", 50))
+    bar_height = st.sidebar.slider("Bar Height per Skill (px)", min_value=30, max_value=80,
+                                   value=st.session_state.bar_height)
     st.session_state.bar_height = bar_height
 
-    show_tables = st.sidebar.checkbox("Show Skills Table", value=st.session_state.get("show_tables", True))
+    show_tables = st.sidebar.checkbox("Show Skills Table", value=st.session_state.show_tables)
     st.session_state.show_tables = show_tables
 
-    # Gemini API Key
-    # -----------------------------
 # -----------------------------
-# Gemini API Key (Hidden)
+# Gemini API Key Configuration
 # -----------------------------
 if "gemini_key" not in st.session_state:
-    # Load from secrets.toml
-    st.session_state.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+    # Try to load from secrets.toml, fallback to empty string
+    try:
+        st.session_state.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+    except:
+        st.session_state.gemini_key = ""
 
 # Configure Gemini if key exists
 if st.session_state.gemini_key:
@@ -149,27 +171,43 @@ if st.session_state.gemini_key:
         configure_gemini(st.session_state.gemini_key)
     except RoadmapGenerationError as e:
         st.sidebar.error(f"Gemini config error: {e}")
+    except Exception as e:
+        st.sidebar.error(f"Error configuring Gemini: {e}")
 else:
-    st.sidebar.warning("⚠️ Gemini API key not found in secrets.toml, roadmap generation disabled.")
-
-
-
+    st.sidebar.warning("⚠️ Gemini API key not found, roadmap generation disabled.")
 
 # -----------------------------
 # Branding (above uploader)
 # -----------------------------
-# -----------------------------
-# Branding (above uploader)
-# -----------------------------
-logo = Image.open("logo.png")
-
-col1, col2 = st.columns([2, 18])  # ratio between logo and text
-with col1:
-    st.image(logo, width=150)  # ⬅️ increase size here (try 150–220)
-with col2:
+# Check if logo exists before trying to load it
+try:
+    if os.path.exists("logo.png"):
+        logo = Image.open("logo.png")
+        col1, col2 = st.columns([2, 18])
+        with col1:
+            st.image(logo, width=150)
+        with col2:
+            st.markdown("""
+                <h1 class='main-heading' style='margin-bottom:0; font-size:2.5rem;'>
+                    SkillPath AI
+                </h1>
+                <p class='main-subheading' style='margin-top:0; font-size:1.3rem; font-style:italic;'>
+                    Your AI-powered career navigator
+                </p>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+            <h1 class='main-heading' style='margin-bottom:0; font-size:2.5rem;'>
+                📈 SkillPath AI
+            </h1>
+            <p class='main-subheading' style='margin-top:0; font-size:1.3rem; font-style:italic;'>
+                Your AI-powered career navigator
+            </p>
+        """, unsafe_allow_html=True)
+except Exception as e:
     st.markdown("""
         <h1 class='main-heading' style='margin-bottom:0; font-size:2.5rem;'>
-            SkillPath AI
+            📈 SkillPath AI
         </h1>
         <p class='main-subheading' style='margin-top:0; font-size:1.3rem; font-style:italic;'>
             Your AI-powered career navigator
@@ -178,51 +216,114 @@ with col2:
 
 st.markdown("---")
 
-
 # -----------------------------
 # Load Skills Data
 # -----------------------------
-with open("skills_data.json", "r") as f:
-    skills_data = json.load(f)
+try:
+    if os.path.exists("skills_data.json"):
+        with open("skills_data.json", "r", encoding="utf-8") as f:
+            skills_data = json.load(f)
 
-required_skills_data = skills_data["required_skills"]
-expanded_terms = skills_data["expanded_skill_terms"]
-course_recommendations = skills_data["course_recommendations"]
+        required_skills_data = skills_data.get("required_skills", {})
+        expanded_terms = skills_data.get("expanded_skill_terms", {})
+        course_recommendations = skills_data.get("course_recommendations", {})
+
+        if not required_skills_data:
+            st.error("No job roles found in skills_data.json")
+            st.stop()
+
+    else:
+        st.error("skills_data.json file not found. Please ensure it exists in the same directory.")
+        st.stop()
+except Exception as e:
+    st.error(f"Error loading skills data: {e}")
+    st.stop()
+
 
 # -----------------------------
 # Helper Functions
 # -----------------------------
+def get_file_type(uploaded_file):
+    """Determine file type from uploaded file"""
+    if uploaded_file.type == "application/pdf":
+        return "pdf"
+    elif uploaded_file.type.startswith("image/"):
+        return "image"
+    else:
+        return "unknown"
+
+
 def extract_text_from_pdf(pdf_file):
+    """Extract text from PDF file"""
     text = ""
-    pdf_reader = PdfReader(pdf_file)
-    for page in pdf_reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + " "
+    try:
+        pdf_reader = PdfReader(pdf_file)
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + " "
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
     return text
 
+
+def extract_text_from_image(image_file):
+    """Extract text from image file using pytesseract OCR"""
+    try:
+        import pytesseract
+        from PIL import Image
+
+        # 🔹 Windows fix: manually set path to tesseract.exe
+        if platform.system() == "Windows":
+            pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+        # Open image
+        image = Image.open(image_file)
+
+        # Extract text using OCR
+        text = pytesseract.image_to_string(image, lang='eng')
+
+        return text.strip()
+    except ImportError:
+        st.error("pytesseract not installed. Please install it: pip install pytesseract")
+        return ""
+    except Exception as e:
+        st.error(f"Error extracting text from image: {e}")
+        return ""
+
+
 def extract_skills_from_text(text, expanded_terms):
+    """Extract skills from text using expanded terms dictionary"""
+    if not text or not expanded_terms:
+        return set()
+
     cleaned_text = text.lower()
     found_skills = set()
+
     for skill, variants in expanded_terms.items():
-        for variant in variants:
-            if re.search(rf"\b{re.escape(variant.lower())}\b", cleaned_text):
-                found_skills.add(skill.lower())
-                break
+        if isinstance(variants, list):
+            for variant in variants:
+                if re.search(rf"\b{re.escape(variant.lower())}\b", cleaned_text):
+                    found_skills.add(skill.lower())
+                    break
     return found_skills
+
 
 def extract_extra_skills(resume_text, exclude_list):
     """
     Extract extra skills strictly from the SKILLS section of the resume,
     ignoring Education, Achievements, Certifications, and other sections.
     """
+    if not resume_text:
+        return []
+
     # Normalize text
     text = resume_text.lower()
 
     # Extract only the Skills section
     match = re.search(
         r"(skills|technical skills)\s*[:\-]?\s*(.+?)(education|experience|projects|certifications|summary|$)",
-        text, re.S
+        text, re.S | re.I
     )
 
     if not match:
@@ -235,44 +336,20 @@ def extract_extra_skills(resume_text, exclude_list):
     candidates = [c.strip() for c in candidates if c.strip()]
 
     # Remove duplicates & anything already in predefined skills
-    extra_skills = [c for c in candidates if c.lower() not in exclude_list]
+    exclude_lower = {str(skill).lower() for skill in exclude_list}
+    extra_skills = [c for c in candidates if c.lower() not in exclude_lower and len(c) > 2]
 
     # Optional: capitalize first letters properly
     extra_skills = [c.title() for c in extra_skills]
 
-    return sorted(extra_skills)
+    return sorted(list(set(extra_skills)))  # Remove duplicates
 
-def extract_extra_skills(resume_text, exclude_list):
-    """
-    Extract extra skills strictly from the SKILLS section of the resume,
-    ignoring Education, Achievements, Certifications, etc.
-    """
-    text = resume_text.lower()
-
-    # Extract only the Skills section
-    match = re.search(
-        r"(skills|technical skills)\s*[:\-]?\s*(.+?)(education|experience|projects|certifications|summary|$)",
-        text, re.S
-    )
-
-    if not match:
-        return []
-
-    skills_section = match.group(2)
-
-    # Split by common separators
-    candidates = re.split(r"[,;\n]", skills_section)
-    candidates = [c.strip() for c in candidates if c.strip()]
-
-    # Remove duplicates & anything already in predefined skills
-    extra_skills = [c for c in candidates if c.lower() not in exclude_list]
-
-    # Capitalize properly
-    extra_skills = [c.title() for c in extra_skills]
-
-    return sorted(extra_skills)
 
 def analyze_resume(resume_text, job_title):
+    """Analyze resume against job requirements"""
+    if not resume_text or not job_title or job_title == "Select a role":
+        return pd.DataFrame(), [], {}, []
+
     # Extract found skills from Skills section
     found_skills = extract_skills_from_text(resume_text, expanded_terms)
 
@@ -285,7 +362,7 @@ def analyze_resume(resume_text, job_title):
     # Job-required skills
     job_skills = set(skill.lower() for skill in required_skills_data[job_title])
     matched_skills = found_skills & job_skills
-    missing_skills = job_skills - found_skills  # 🔹 missing skills
+    missing_skills = job_skills - found_skills
 
     skills_df = pd.DataFrame({
         "Skill": list(job_skills),
@@ -304,9 +381,15 @@ def analyze_resume(resume_text, job_title):
 # -----------------------------
 # Main UI
 # -----------------------------
-uploaded_file = st.file_uploader("📤 Upload Resume (PDF)", type=["pdf"])
-job_roles = sorted(list(required_skills_data.keys()))
-desired_role = st.selectbox("🎯 Target Job Role", options=["Select a role"] + job_roles)
+uploaded_file = st.file_uploader("📤 Upload Resume (PDF or Image)", type=["pdf", "png", "jpg", "jpeg"])
+
+if required_skills_data:
+    job_roles = sorted(list(required_skills_data.keys()))
+    desired_role = st.selectbox("🎯 Target Job Role", options=["Select a role"] + job_roles)
+else:
+    st.error("No job roles available. Please check skills_data.json")
+    desired_role = "Select a role"
+
 career_objective = st.text_area("📝 Career Objective (Optional)", placeholder="Your career goals...")
 
 if st.button("🔍 Analyze Resume", type="primary"):
@@ -315,67 +398,107 @@ if st.button("🔍 Analyze Resume", type="primary"):
     elif desired_role == "Select a role":
         st.warning("Please select your target job role.")
     else:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
+        try:
+            file_type = get_file_type(uploaded_file)
 
-        resume_text = extract_text_from_pdf(tmp_path)
-        skills_df, missing_skills, course_suggestions, extra_skills = analyze_resume(resume_text, desired_role)
-        st.session_state.extra_skills = extra_skills
-        st.session_state.skills_df = skills_df
-        st.session_state.missing_skills = missing_skills
-        st.session_state.course_suggestions = course_suggestions
-        st.session_state.desired_role = desired_role
-        st.session_state.career_objective = career_objective
-        st.session_state.resume_uploaded = True
+            if file_type == "pdf":
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_file.read())
+                    tmp_path = tmp.name
+                resume_text = extract_text_from_pdf(tmp_path)
+                os.remove(tmp_path)
 
-        if career_objective.strip():
-            st.session_state.career_analysis = analyze_goals(career_objective.strip())
-        else:
-            st.session_state.career_analysis = None
+            elif file_type == "image":
+                uploaded_file.seek(0)  # Reset file pointer
+                resume_text = extract_text_from_image(uploaded_file)
 
-        os.remove(tmp_path)
+            else:
+                st.error("Unsupported file format. Please upload a PDF or image file.")
+                resume_text = ""
 
+            if resume_text and resume_text.strip():
+                # Store resume text for later use
+                st.session_state.resume_text = resume_text
+
+                skills_df, missing_skills, course_suggestions, extra_skills = analyze_resume(resume_text, desired_role)
+                st.session_state.extra_skills = extra_skills
+                st.session_state.skills_df = skills_df
+                st.session_state.missing_skills = missing_skills
+                st.session_state.course_suggestions = course_suggestions
+                st.session_state.desired_role = desired_role
+                st.session_state.career_objective = career_objective
+                st.session_state.resume_uploaded = True
+
+                if career_objective.strip():
+                    try:
+                        st.session_state.career_analysis = analyze_goals(career_objective.strip())
+                    except Exception as e:
+                        st.error(f"Error analyzing career goals: {e}")
+                        st.session_state.career_analysis = None
+                else:
+                    st.session_state.career_analysis = None
+
+                st.success("✅ Resume analyzed successfully!")
+            else:
+                st.error("No text could be extracted from the file. Please try a different file or format.")
+
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
+
+# Display results if resume has been analyzed
 if st.session_state.get("resume_uploaded", False):
-    skills_df = st.session_state.skills_df
-    missing_skills = st.session_state.missing_skills
-    course_suggestions = st.session_state.course_suggestions
+    skills_df = st.session_state.get("skills_df", pd.DataFrame())
+    missing_skills = st.session_state.get("missing_skills", [])
+    course_suggestions = st.session_state.get("course_suggestions", {})
 
+    # Career Goal Analysis
     if st.session_state.get("career_analysis"):
         st.markdown("<div class='stCard'><h3>📊 Career Goal Analysis</h3>", unsafe_allow_html=True)
         st.write(st.session_state.career_analysis)
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Smart Gap Analysis Button
-    if st.session_state.get("resume_uploaded", False):
-        if st.button("🤖 Generate Smart Gap Analysis"):
-            try:
+    if st.button("🤖 Generate Smart Gap Analysis"):
+        try:
+            resume_text = st.session_state.get("resume_text", "")
+
+            if resume_text.strip():
                 analysis = get_smart_gap_analysis(
                     resume_text=resume_text,
-                    target_role=st.session_state.desired_role,
-                    user_goal=st.session_state.career_objective
+                    target_role=st.session_state.get("desired_role", ""),
+                    user_goal=st.session_state.get('career_objective', '')
                 )
                 st.markdown("<div class='stCard'><h3>📝 Smart Gap Analysis</h3>", unsafe_allow_html=True)
                 st.write(analysis)
                 st.markdown("</div>", unsafe_allow_html=True)
-            except SmartGapAnalysisError as e:
-                st.error(f"Gap Analysis Error: {e}")
+            else:
+                st.error("No text available for gap analysis. Please re-analyze your resume first.")
+
+        except SmartGapAnalysisError as e:
+            st.error(f"Gap Analysis Error: {e}")
+        except Exception as e:
+            st.error(f"Unexpected error during gap analysis: {e}")
+
+    # Skills Tables and Visualization
     if st.session_state.get("show_tables", True):
-        # Left column → matched/extracted skills table
+        # Extracted skills table
         st.markdown("<div class='stCard'><h3>✅ Extracted Skills</h3>", unsafe_allow_html=True)
-        st.dataframe(skills_df[["Skill", "Match (%)"]], use_container_width=True)
+        if not skills_df.empty:
+            st.dataframe(skills_df[["Skill", "Match (%)"]], use_container_width=True)
+        else:
+            st.write("No matching skills found.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Separate section for missing skills
+        # Missing skills
         st.markdown("<div class='stCard'><h3>❌ Missing Skills</h3>", unsafe_allow_html=True)
-        if st.session_state.missing_skills:
-            st.write(", ".join(f"**{skill}**" for skill in st.session_state.missing_skills))
+        if missing_skills:
+            st.write(", ".join(f"**{skill}**" for skill in missing_skills))
         else:
             st.success("No missing skills detected!")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Separate section for additional skills found in resume
-        if st.session_state.extra_skills:
+        # Additional skills found in resume
+        if st.session_state.get("extra_skills", []):
             st.markdown("<div class='stCard'><h3>📌 Additional Skills Found in Resume</h3>", unsafe_allow_html=True)
 
             col1, col2 = st.columns(2)
@@ -387,38 +510,45 @@ if st.session_state.get("resume_uploaded", False):
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-    fig = go.Figure(data=[
-        go.Bar(
-            x=skills_df['Match (%)'],
-            y=skills_df['Skill'],
-            orientation='h',
-            marker=dict(color=skills_df['Color']),
-            text=skills_df['Match (%)'],
-            textposition='auto'
+    # Skills Visualization
+    if not skills_df.empty:
+        fig = go.Figure(data=[
+            go.Bar(
+                x=skills_df['Match (%)'],
+                y=skills_df['Skill'],
+                orientation='h',
+                marker=dict(color=skills_df['Color']),
+                text=skills_df['Match (%)'],
+                textposition='auto'
+            )
+        ])
+        fig.update_layout(
+            title="Skill Match Overview",
+            xaxis=dict(title="Match %", range=[0, 100]),
+            yaxis=dict(title="Skills"),
+            height=max(300, st.session_state.get("bar_height", 50) * len(skills_df))
         )
-    ])
-    fig.update_layout(
-        title="Skill Match Overview",
-        xaxis=dict(title="Match %", range=[0, 100]),
-        yaxis=dict(title="Skills"),
-        height=max(300, st.session_state.get("bar_height", 50) * len(skills_df))
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
+    # Course Suggestions
     st.markdown("<div class='stCard'><h3>📚 Suggested Courses</h3>", unsafe_allow_html=True)
-    for skill, courses in course_suggestions.items():
-        with st.expander(f"📌 {skill.capitalize()}"):
-            for course in courses:
-                st.markdown(f"- [{course['title']}]({course['url']})")
+    if course_suggestions:
+        for skill, courses in course_suggestions.items():
+            with st.expander(f"📌 {skill.capitalize()}"):
+                for course in courses:
+                    st.markdown(f"- [{course['title']}]({course['url']})")
+    else:
+        st.write("No course suggestions available.")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # AI Roadmap Generation
     if st.session_state.get("gemini_key", ""):
         if st.button("🤖 Generate AI-Powered Roadmap"):
             try:
                 prompt = (
-                    f"Create a learning roadmap for becoming a {st.session_state.desired_role}. "
-                    f"Missing skills: {', '.join(st.session_state.missing_skills)}. "
-                    f"Career goal: {st.session_state.career_objective}"
+                    f"Create a learning roadmap for becoming a {st.session_state.get('desired_role', '')}. "
+                    f"Missing skills: {', '.join(missing_skills)}. "
+                    f"Career goal: {st.session_state.get('career_objective', '')}"
                 )
                 roadmap_text = generate_roadmap(prompt)
                 st.markdown("<div class='stCard'><h3>🛣️ AI-Powered Roadmap</h3>", unsafe_allow_html=True)
@@ -426,6 +556,25 @@ if st.session_state.get("resume_uploaded", False):
                 st.markdown("</div>", unsafe_allow_html=True)
             except RoadmapGenerationError as e:
                 st.error(str(e))
+            except Exception as e:
+                st.error(f"Error generating roadmap: {e}")
     else:
-        st.warning("Enter your Gemini API key in the sidebar to enable AI roadmap generation.")
+        st.warning("Gemini API key not configured. AI roadmap generation is disabled.")
 
+# -----------------------------
+# Footer
+# -----------------------------
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; padding: 1rem; margin-top: 2rem; opacity: 0.7;'>
+        <p style='margin: 0; font-size: 0.9rem;'>
+            © 2025 SkillPath AI. All rights reserved.
+        </p>
+        <p style='margin: 0.5rem 0 0 0; font-size: 0.8rem;'>
+            Made with ❤️ by <strong>Sanchari Roy</strong>
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
